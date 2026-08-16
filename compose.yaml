@@ -14,6 +14,31 @@
 
 name: tout-pris
 
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+# Watchtower (service commenté en fin de fichier) ne surveille que les
+# conteneurs portant ce label, grâce à WATCHTOWER_LABEL_ENABLE=true.
+x-watchtower-enable: &watchtower_enable
+  com.centurylinklabs.watchtower.enable: "true"
+
+# Base commune aux services qui manipulent la base : la boucle de sauvegarde et
+# les utilitaires ponctuels du profil `tools`. Même image, mêmes montages.
+x-db-tool: &db_tool
+  build: ./backup
+  image: tout-pris-backup:local
+  volumes:
+    # Monté en lecture-écriture volontairement : en mode WAL, SQLite doit
+    # pouvoir créer/ouvrir l'index partagé (-shm) même pour un simple
+    # lecteur. Un montage :ro ferait échouer la sauvegarde.
+    - db_data:/data
+    - ./backups:/backups
+  networks: [toutpris]
+  logging: *logging
+
 services:
   # --- API FastAPI ----------------------------------------------------------
   api:
@@ -22,10 +47,7 @@ services:
     environment:
       # Quatre slashes = chemin absolu : le fichier vit dans le volume db_data.
       DATABASE_URL: ${DATABASE_URL:-sqlite:////data/tout_pris.db}
-    labels: &watchtower_enable
-      # Watchtower (service commenté en fin de fichier) ne surveille que les
-      # conteneurs portant ce label, grâce à WATCHTOWER_LABEL_ENABLE=true.
-      com.centurylinklabs.watchtower.enable: "true"
+    labels: *watchtower_enable
     volumes:
       - db_data:/data
     # On surcharge la commande de l'image pour deux raisons :
@@ -58,11 +80,7 @@ services:
       retries: 5
       start_period: 30s
     networks: [toutpris]
-    logging: &logging
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
+    logging: *logging
 
   # --- Front SvelteKit (SPA statique servie par nginx) ----------------------
   front:
@@ -111,11 +129,8 @@ services:
 
   # --- Sauvegardes de la base ----------------------------------------------
   # Snapshot cohérent à intervalle régulier, compressé et daté dans ./backups.
-  # `docker compose run --rm backup once` déclenche une sauvegarde immédiate.
-  # Restauration : voir le README.
   backup:
-    build: ./backup
-    image: tout-pris-backup:local
+    <<: *db_tool
     restart: unless-stopped
     environment:
       BACKUP_DIR: /backups
@@ -123,17 +138,43 @@ services:
       BACKUP_RETENTION: ${BACKUP_RETENTION:-14}
       SQLITE_PATH: ${SQLITE_PATH:-/data/tout_pris.db}
       HEALTHCHECK_URL: ${HEALTHCHECK_URL:-}
-    volumes:
-      # Monté en lecture-écriture volontairement : en mode WAL, SQLite doit
-      # pouvoir créer/ouvrir l'index partagé (-shm) même pour un simple
-      # lecteur. Un montage :ro ferait échouer la sauvegarde.
-      - db_data:/data
-      - ./backups:/backups
     depends_on:
       api:
         condition: service_healthy
-    networks: [toutpris]
-    logging: *logging
+
+  # --- Utilitaires ponctuels (profil `tools`) -------------------------------
+  # Ces deux services ne démarrent pas avec `docker compose up -d` : ils sont
+  # derrière un profil, et ne s'exécutent que si on les nomme explicitement.
+  # Ils tournent une fois puis s'arrêtent (`restart: "no"`).
+  #
+  #   docker compose up backup-once            -> sauvegarde immédiate
+  #   ARCHIVE=<fichier> docker compose up restore   -> restauration
+  #
+  # Volontairement sans `depends_on` : la restauration se fait `api` arrêtée.
+
+  backup-once:
+    <<: *db_tool
+    profiles: ["tools"]
+    restart: "no"
+    environment:
+      BACKUP_DIR: /backups
+      BACKUP_RETENTION: ${BACKUP_RETENTION:-14}
+      SQLITE_PATH: ${SQLITE_PATH:-/data/tout_pris.db}
+      HEALTHCHECK_URL: ${HEALTHCHECK_URL:-}
+    command: ["once"]
+
+  restore:
+    <<: *db_tool
+    profiles: ["tools"]
+    restart: "no"
+    environment:
+      # Nom du fichier à restaurer, dans ./backups. `.gz` accepté tel quel.
+      # Le script refuse de démarrer si la variable est vide.
+      ARCHIVE: ${ARCHIVE:-}
+      BACKUP_DIR: /backups
+      SQLITE_PATH: ${SQLITE_PATH:-/data/tout_pris.db}
+    entrypoint: ["/usr/local/bin/restore.sh"]
+    command: []
 
   # --- Mises à jour automatiques (optionnel) --------------------------------
   # Watchtower interroge le registre à intervalle régulier et recrée les

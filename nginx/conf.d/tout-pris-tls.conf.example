@@ -3,10 +3,11 @@
 #
 # Mise en service :
 #   1. remplacer toutes les occurrences de tout-pris.example.com par le domaine
-#   2. obtenir un certificat (voir README.md § HTTPS) :
-#      docker compose run --rm --entrypoint certbot \
-#        -v ./nginx/certs:/etc/letsencrypt certbot certonly --webroot \
-#        -w /var/www/certbot -d tout-pris.example.com
+#   2. obtenir un certificat — certbot n'est pas un service de la stack, il se
+#      lance ponctuellement (procédure complète dans README.md § HTTPS) :
+#      docker run --rm -v tout-pris_certbot_webroot:/var/www/certbot \
+#        -v ./nginx/certs:/etc/letsencrypt certbot/certbot certonly \
+#        --webroot -w /var/www/certbot -d tout-pris.example.com
 #   3. mv tout-pris.conf tout-pris.conf.disabled
 #      cp tout-pris-tls.conf.example tout-pris-tls.conf
 #   4. docker compose exec nginx nginx -t && docker compose exec nginx nginx -s reload
