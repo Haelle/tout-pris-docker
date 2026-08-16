@@ -1,0 +1,105 @@
+# Variante HTTPS du vhost. nginx ne charge que les *.conf : ce fichier est
+# inerte tant qu'il garde l'extension .example.
+#
+# Mise en service :
+#   1. remplacer toutes les occurrences de tout-pris.example.com par le domaine
+#   2. obtenir un certificat (voir README.md § HTTPS) :
+#      docker compose run --rm --entrypoint certbot \
+#        -v ./nginx/certs:/etc/letsencrypt certbot certonly --webroot \
+#        -w /var/www/certbot -d tout-pris.example.com
+#   3. mv tout-pris.conf tout-pris.conf.disabled
+#      cp tout-pris-tls.conf.example tout-pris-tls.conf
+#   4. docker compose exec nginx nginx -t && docker compose exec nginx nginx -s reload
+
+# --- HTTP : challenge ACME + redirection vers HTTPS --------------------------
+server {
+    # Pas de `listen [::]:…` : voir la note dans tout-pris.conf.
+    listen      80 default_server;
+    server_name tout-pris.example.com;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        access_log off;
+    }
+
+    location / {
+        return 308 https://$host$request_uri;
+    }
+}
+
+# --- HTTPS -------------------------------------------------------------------
+server {
+    listen      443 ssl default_server;
+    http2       on;
+    server_name tout-pris.example.com;
+
+    ssl_certificate     /etc/nginx/certs/live/tout-pris.example.com/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/live/tout-pris.example.com/privkey.pem;
+
+    ssl_protocols             TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_ciphers               ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+    ssl_session_cache         shared:SSL:10m;
+    ssl_session_timeout       1d;
+    ssl_session_tickets       off;
+
+    # Agrafage OCSP : nécessite le chain.pem de Let's Encrypt.
+    ssl_stapling        on;
+    ssl_stapling_verify on;
+    ssl_trusted_certificate /etc/nginx/certs/live/tout-pris.example.com/chain.pem;
+
+    # HSTS : à n'activer qu'une fois le HTTPS confirmé fonctionnel — un
+    # navigateur qui a vu cet en-tête refusera le HTTP pendant 2 ans.
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+    add_header X-Content-Type-Options    "nosniff"                             always;
+    add_header X-Frame-Options           "SAMEORIGIN"                          always;
+    add_header Referrer-Policy           "strict-origin-when-cross-origin"     always;
+
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    location ~ ^/api/(.*)$ {
+        limit_req zone=api burst=40 nodelay;
+
+        set        $api_upstream api:8000;
+        proxy_pass http://$api_upstream/$1$is_args$args;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+        proxy_set_header Connection        "";
+
+        proxy_connect_timeout 5s;
+        proxy_send_timeout    60s;
+        proxy_read_timeout    60s;
+
+        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+        add_header X-Content-Type-Options    "nosniff"                             always;
+        add_header Cache-Control             "no-store"                            always;
+    }
+
+    location = /api {
+        return 308 /api/;
+    }
+
+    location / {
+        set        $front_upstream front:80;
+        proxy_pass http://$front_upstream;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection        "";
+
+        proxy_connect_timeout 5s;
+        proxy_read_timeout    30s;
+    }
+}

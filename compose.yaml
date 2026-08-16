@@ -1,0 +1,135 @@
+# Stack Tout Pris — déploiement de production.
+#
+#   internet ──▶ nginx (80/443) ─┬─▶ front  (nginx:alpine, SPA statique)
+#                                └─▶ api    (uvicorn/FastAPI) ──▶ SQLite (volume db_data)
+#                                                                      ▲
+#                                                            backup ───┘ (snapshots .backup + gzip)
+#
+# Seul `nginx` publie des ports : `api` et `front` ne sont joignables que
+# depuis le réseau interne de la stack.
+#
+# Base de données : le backend utilise SQLite (fichier unique dans le volume
+# `db_data`). Pour PostgreSQL, voir compose.postgres.yaml — qui demande des
+# modifications côté tout-pris-back, détaillées dans ce fichier.
+
+name: tout-pris
+
+services:
+  # --- API FastAPI ----------------------------------------------------------
+  api:
+    image: ${API_IMAGE:-estb/tout-pris-back}:${API_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      # Quatre slashes = chemin absolu : le fichier vit dans le volume db_data.
+      DATABASE_URL: ${DATABASE_URL:-sqlite:////data/tout_pris.db}
+    volumes:
+      - db_data:/data
+    # On surcharge la commande de l'image pour deux raisons :
+    #  - --root-path /api : FastAPI sait qu'il est monté derrière le préfixe
+    #    /api, donc /api/docs et /api/openapi.json fonctionnent à travers le
+    #    proxy (les routes JSON, elles, marchent avec ou sans).
+    #  - --proxy-headers : uvicorn fait confiance aux X-Forwarded-* posés par
+    #    nginx (schéma et IP client corrects dans les logs et les redirections).
+    command:
+      - uvicorn
+      - app.main:app
+      - --host=0.0.0.0
+      - --port=8000
+      - --root-path=/api
+      - --proxy-headers
+      # nginx est le seul à pouvoir joindre ce service, et son IP interne
+      # change à chaque recréation : on fait confiance au réseau de la stack.
+      - --forwarded-allow-ips=*
+    healthcheck:
+      # L'image de prod ne contient ni curl ni wget : on utilise Python.
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import sys, urllib.request
+          sys.exit(0 if urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3).status == 200 else 1)
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks: [toutpris]
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # --- Front SvelteKit (SPA statique servie par nginx) ----------------------
+  front:
+    image: ${FRONT_IMAGE:-estb/tout-pris-front}:${FRONT_TAG:-latest}
+    restart: unless-stopped
+    healthcheck:
+      # nginx:alpine embarque le wget de busybox.
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks: [toutpris]
+    logging: *logging
+
+  # --- Reverse proxy d'entrée ----------------------------------------------
+  nginx:
+    image: nginx:1.29-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - certbot_webroot:/var/www/certbot
+    depends_on:
+      api:
+        condition: service_healthy
+      front:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks: [toutpris]
+    logging: *logging
+
+  # --- Sauvegardes de la base ----------------------------------------------
+  # Snapshot cohérent à intervalle régulier, compressé et daté dans ./backups.
+  # `docker compose run --rm backup once` déclenche une sauvegarde immédiate.
+  # Voir docs/BACKUP.md pour les autres stratégies (Litestream, snapshots…).
+  backup:
+    build: ./backup
+    image: tout-pris-backup:local
+    restart: unless-stopped
+    environment:
+      BACKUP_ENGINE: ${BACKUP_ENGINE:-sqlite}
+      BACKUP_DIR: /backups
+      BACKUP_INTERVAL: ${BACKUP_INTERVAL:-86400}
+      BACKUP_RETENTION: ${BACKUP_RETENTION:-14}
+      SQLITE_PATH: ${SQLITE_PATH:-/data/tout_pris.db}
+      HEALTHCHECK_URL: ${HEALTHCHECK_URL:-}
+    volumes:
+      # Monté en lecture-écriture volontairement : en mode WAL, SQLite doit
+      # pouvoir créer/ouvrir l'index partagé (-shm) même pour un simple
+      # lecteur. Un montage :ro ferait échouer la sauvegarde.
+      - db_data:/data
+      - ./backups:/backups
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [toutpris]
+    logging: *logging
+
+volumes:
+  db_data:
+  certbot_webroot:
+
+networks:
+  toutpris:
