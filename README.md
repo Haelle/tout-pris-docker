@@ -198,9 +198,12 @@ compressée de la base, toutes les `BACKUP_INTERVAL` secondes, en ne conservant
 que les `BACKUP_RETENTION` dernières.
 
 ```sh
-docker compose run --rm backup once    # sauvegarde immédiate
-ls -lh backups/                        # archives disponibles
+docker compose up backup-once    # sauvegarde immédiate, puis le conteneur s'arrête
+ls -lh backups/                  # archives disponibles
 ```
+
+`backup-once` et `restore` sont derrière le profil `tools` : ils ne démarrent
+pas avec `docker compose up -d`, uniquement quand on les nomme.
 
 Il utilise `sqlite3 .backup`, c'est-à-dire l'**API de sauvegarde en ligne** de
 SQLite : elle produit un fichier cohérent pendant que l'API continue d'écrire.
@@ -235,58 +238,35 @@ renverra des 502 le temps de l'opération.
 docker compose stop api backup
 ```
 
-**3. Décompresser l'archive** (`-k` conserve le `.gz` d'origine). À faire
-maintenant, et pas plus tard : le fichier décompressé ne correspond plus au
-motif `*.sqlite.gz` de la rotation, donc la sauvegarde de l'étape 5 ne risque
-pas de le faire disparaître s'il était le plus ancien des `BACKUP_RETENTION`.
+**3. Lancer la restauration**, en passant le nom du fichier (le `.gz` est
+accepté tel quel, pas besoin de le décompresser).
 
 ```sh
-gunzip -k backups/tout_pris-20260816T031500Z.sqlite.gz
+ARCHIVE=tout_pris-20260816T031500Z.sqlite.gz docker compose up restore
 ```
 
-**4. Vérifier l'archive avant de toucher à la base.** Une restauration qui
-échoue après avoir écrasé la base en place est une double panne. Le `--no-deps`
-est nécessaire ici : sans lui, `docker compose run` relancerait `api`, qu'on
-vient justement d'arrêter.
+Le service `restore` enchaîne, dans cet ordre :
 
-```sh
-docker compose run --rm --no-deps --entrypoint sqlite3 backup \
-  /backups/tout_pris-20260816T031500Z.sqlite 'PRAGMA integrity_check;'
-# doit afficher : ok
-```
+1. décompression de l'archive dans un fichier de travail — l'original reste
+   intact même si la suite échoue ;
+2. `PRAGMA integrity_check` sur cette copie, et **arrêt immédiat** si elle est
+   inutilisable. C'est le point important : une restauration qui échoue après
+   avoir écrasé la base en place est une double panne ;
+3. mise de côté de la base actuelle dans
+   `backups/avant-restauration-<horodatage>.sqlite.gz` — même une base qu'on
+   croit perdue peut contenir des écritures plus récentes que l'archive. Ce nom
+   ne correspond pas au motif de rotation, cette copie ne sera donc jamais
+   purgée automatiquement ;
+4. suppression des `-wal`/`-shm` résiduels, qui appartiennent à l'ancienne base
+   et feraient rejouer à SQLite un journal ne correspondant plus au fichier
+   restauré, puis installation de l'archive avec un `chown 999:999`
+   (l'utilisateur non-root de l'image de production de `tout-pris-back`).
 
-**5. Sauvegarder la base actuelle**, même si on la croit perdue : elle contient
-peut-être des écritures plus récentes que l'archive.
+Sans `ARCHIVE`, le script s'arrête en listant les archives disponibles. La
+logique est dans [`backup/restore.sh`](backup/restore.sh), lisible d'un bout à
+l'autre.
 
-```sh
-docker compose run --rm --no-deps backup once
-```
-
-Si cette commande échoue parce que la base est corrompue, copier quand même les
-trois fichiers en l'état — l'`api` étant arrêtée, ils forment un ensemble
-cohérent et un outil de réparation pourra encore en tirer quelque chose :
-
-```sh
-docker compose run --rm --no-deps --entrypoint sh backup -c \
-  'cp -a /data/tout_pris.db* /backups/ 2>/dev/null; ls -l /backups'
-```
-
-**6. Remettre l'archive en place.** Les fichiers `-wal` et `-shm` résiduels
-doivent impérativement être supprimés : ils appartiennent à l'ancienne base, et
-SQLite tenterait de rejouer un WAL qui ne correspond plus au fichier restauré.
-Le `chown 999:999` correspond à l'utilisateur non-root de l'image de production
-de `tout-pris-back`.
-
-```sh
-docker compose run --rm --no-deps --entrypoint sh backup -c '
-  rm -f /data/tout_pris.db /data/tout_pris.db-wal /data/tout_pris.db-shm &&
-  cp /backups/tout_pris-20260816T031500Z.sqlite /data/tout_pris.db &&
-  chown 999:999 /data/tout_pris.db &&
-  ls -l /data
-'
-```
-
-**7. Redémarrer et vérifier.**
+**4. Redémarrer et vérifier.**
 
 ```sh
 docker compose up -d
