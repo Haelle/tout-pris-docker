@@ -22,6 +22,10 @@ services:
     environment:
       # Quatre slashes = chemin absolu : le fichier vit dans le volume db_data.
       DATABASE_URL: ${DATABASE_URL:-sqlite:////data/tout_pris.db}
+    labels: &watchtower_enable
+      # Watchtower (service commenté en fin de fichier) ne surveille que les
+      # conteneurs portant ce label, grâce à WATCHTOWER_LABEL_ENABLE=true.
+      com.centurylinklabs.watchtower.enable: "true"
     volumes:
       - db_data:/data
     # On surcharge la commande de l'image pour deux raisons :
@@ -64,6 +68,7 @@ services:
   front:
     image: ${FRONT_IMAGE:-estb/tout-pris-front}:${FRONT_TAG:-latest}
     restart: unless-stopped
+    labels: *watchtower_enable
     healthcheck:
       # nginx:alpine embarque le wget de busybox.
       test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1/"]
@@ -78,6 +83,10 @@ services:
   nginx:
     image: nginx:1.29-alpine
     restart: unless-stopped
+    # Volontairement non labellisé : nginx est le seul service exposé, et une
+    # recréation automatique coupe toutes les connexions en cours. Décommentez
+    # si vous préférez que les correctifs de sécurité nginx arrivent seuls.
+    # labels: *watchtower_enable
     ports:
       - "${HTTP_PORT:-80}:80"
       - "${HTTPS_PORT:-443}:443"
@@ -125,6 +134,48 @@ services:
         condition: service_healthy
     networks: [toutpris]
     logging: *logging
+
+  # --- Mises à jour automatiques (optionnel) --------------------------------
+  # Watchtower interroge le registre à intervalle régulier et recrée les
+  # conteneurs dont l'image a changé — ici uniquement `api` et `front`, les
+  # seuls à porter le label com.centurylinklabs.watchtower.enable.
+  #
+  # Trois choses à savoir avant de décommenter :
+  #
+  #  1. Il faut suivre un tag mobile : API_TAG/FRONT_TAG à `dev` (suit main) ou
+  #     `latest` (suit le dernier tag git). Avec un tag semver épinglé le digest
+  #     ne bouge jamais, et Watchtower ne fera donc jamais rien.
+  #  2. Monter le socket Docker donne au conteneur un accès équivalent à root
+  #     sur l'hôte. C'est le compromis inhérent à l'auto-update.
+  #  3. Le service `backup` est construit localement (pas de registre) : il ne
+  #     sera pas mis à jour, et n'a pas à l'être.
+  #
+  # La recréation d'un conteneur lui donne une nouvelle IP interne — c'est sans
+  # conséquence ici, la configuration nginx re-résolvant les noms de services à
+  # chaque requête (voir `resolver` dans nginx/nginx.conf).
+  #
+  # watchtower:
+  #   image: containrrr/watchtower:1.7.1
+  #   restart: unless-stopped
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock
+  #   environment:
+  #     # N'agit que sur les conteneurs explicitement labellisés.
+  #     WATCHTOWER_LABEL_ENABLE: "true"
+  #     # Cron à 6 champs (les secondes en premier) : tous les jours à 4 h.
+  #     WATCHTOWER_SCHEDULE: "0 0 4 * * *"
+  #     # Supprime l'ancienne image après coup, sinon le disque se remplit.
+  #     WATCHTOWER_CLEANUP: "true"
+  #     # Un conteneur à la fois plutôt que tous ensemble.
+  #     WATCHTOWER_ROLLING_RESTART: "true"
+  #     TZ: ${TZ:-Europe/Paris}
+  #     # Pour commencer en observation : signale les mises à jour sans les
+  #     # appliquer. Recommandé le temps de vérifier ce qui serait recréé.
+  #     # WATCHTOWER_MONITOR_ONLY: "true"
+  #     # Notifications via shoutrrr (Discord, Slack, Gotify, SMTP…).
+  #     # WATCHTOWER_NOTIFICATION_URL: ${WATCHTOWER_NOTIFICATION_URL:-}
+  #   networks: [toutpris]
+  #   logging: *logging
 
 volumes:
   db_data:

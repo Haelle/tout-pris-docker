@@ -73,13 +73,17 @@ Tout passe par `.env` (voir [`.env.example`](.env.example)) :
 | `BACKUP_INTERVAL` | `86400` | secondes entre deux sauvegardes |
 | `BACKUP_RETENTION` | `14` | archives conservées |
 | `HEALTHCHECK_URL` | *(vide)* | ping de supervision après sauvegarde |
+| `TZ` | `Europe/Paris` | fuseau du planificateur Watchtower |
 
 Les tags publiés par la CI des deux dépôts : `dev` suit `main`, `latest` suit le
-dernier tag git, et les tags semver (`1`, `1.2`, `1.2.3`) permettent
-d'épingler. **En production, épinglez une version** — `latest` rend les
-rollbacks pénibles.
+dernier tag git, et les tags semver (`1`, `1.2`, `1.2.3`) permettent d'épingler.
+Le choix du tag détermine la stratégie de mise à jour (voir ci-dessous) : un tag
+semver rend les déploiements explicites et les rollbacks triviaux, un tag mobile
+est ce qu'attend Watchtower. Il faut choisir — pas les deux.
 
 ## Mise à jour
+
+### Manuelle
 
 ```sh
 docker compose pull
@@ -89,6 +93,40 @@ docker compose ps
 
 Les migrations Alembic sont appliquées automatiquement au démarrage de l'API
 (`command.upgrade(…, "head")` dans son `lifespan`).
+
+### Automatique, avec Watchtower
+
+Les services `api` et `front` portent le label
+`com.centurylinklabs.watchtower.enable=true`. Le service `watchtower`
+correspondant est **fourni commenté en fin de [`compose.yaml`](compose.yaml)** :
+il suffit de le décommenter pour que les mises à jour se fassent seules.
+
+Combiné à `WATCHTOWER_LABEL_ENABLE=true`, ce label restreint Watchtower à ces
+deux conteneurs : `nginx` et `backup` ne seront pas touchés. `nginx` est
+délibérément laissé de côté — c'est le seul service exposé, et une recréation
+coupe les connexions en cours ; son label est présent mais commenté si vous
+préférez l'inverse. Quant à `backup`, il est construit localement : il n'y a pas
+de registre à surveiller.
+
+Trois points avant de décommenter :
+
+- **Le tag doit être mobile.** Avec `API_TAG=1.2.3`, le digest ne change jamais
+  et Watchtower ne fera strictement rien. Il faut `dev` (suit `main`) ou
+  `latest` (suit le dernier tag git).
+- **Le socket Docker donne un accès équivalent à root sur l'hôte.** C'est le
+  compromis inhérent à l'auto-update, à accepter en connaissance de cause.
+- **Commencez en observation.** `WATCHTOWER_MONITOR_ONLY=true` (présent
+  commenté) signale ce qui serait mis à jour sans rien recréer.
+
+La recréation d'un conteneur lui donne une nouvelle IP interne, sans
+conséquence ici : la configuration nginx re-résout les noms de services à
+chaque requête (voir la note sur `resolver` plus bas). Sans ça, chaque mise à
+jour automatique laisserait le proxy en 502.
+
+Un point à garder en tête : une nouvelle image du backend peut embarquer une
+migration Alembic, appliquée sans supervision au redémarrage. C'est une raison
+de plus de garder le service `backup` actif — et, si les migrations deviennent
+lourdes, de repasser en mise à jour manuelle.
 
 ## nginx
 
