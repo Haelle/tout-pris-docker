@@ -1,0 +1,14 @@
+# Configuration locale (secrets, ports, tags d'images)
+.env
+
+# Sauvegardes produites par le service `backup`
+/backups/*
+!/backups/.gitkeep
+
+# Certificats TLS
+/nginx/certs/*
+!/nginx/certs/.gitkeep
+
+# Divers
+*.log
+.DS_Store
