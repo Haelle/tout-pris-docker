@@ -8,9 +8,9 @@
 # Seul `nginx` publie des ports : `api` et `front` ne sont joignables que
 # depuis le réseau interne de la stack.
 #
-# Base de données : le backend utilise SQLite (fichier unique dans le volume
-# `db_data`). Pour PostgreSQL, voir compose.postgres.yaml — qui demande des
-# modifications côté tout-pris-back, détaillées dans ce fichier.
+# Base de données : le backend utilise SQLite, un fichier unique dans le volume
+# `db_data`. Il n'y a donc pas de service `db` — la « base » est ce volume,
+# et c'est lui que le service `backup` sauvegarde.
 
 name: tout-pris
 
@@ -103,13 +103,12 @@ services:
   # --- Sauvegardes de la base ----------------------------------------------
   # Snapshot cohérent à intervalle régulier, compressé et daté dans ./backups.
   # `docker compose run --rm backup once` déclenche une sauvegarde immédiate.
-  # Voir docs/BACKUP.md pour les autres stratégies (Litestream, snapshots…).
+  # Restauration : voir le README.
   backup:
     build: ./backup
     image: tout-pris-backup:local
     restart: unless-stopped
     environment:
-      BACKUP_ENGINE: ${BACKUP_ENGINE:-sqlite}
       BACKUP_DIR: /backups
       BACKUP_INTERVAL: ${BACKUP_INTERVAL:-86400}
       BACKUP_RETENTION: ${BACKUP_RETENTION:-14}

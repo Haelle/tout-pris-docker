@@ -1,11 +1,10 @@
-# Conteneur de sauvegarde : embarque les clients SQLite et PostgreSQL, et
-# tourne en boucle (voir backup.sh). Volontairement minuscule — la logique
-# tient dans un script shell relisible sans documentation.
+# Conteneur de sauvegarde : le client sqlite3, et une boucle (voir backup.sh).
+# Volontairement minuscule — la logique tient dans un script shell relisible
+# sans documentation.
 FROM alpine:3.22
 
 RUN apk add --no-cache \
       sqlite \
-      postgresql17-client \
       gzip \
       curl \
       tzdata

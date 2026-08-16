@@ -32,24 +32,16 @@ Le front et l'API sont servis **depuis la même origine** : le SPA appelle
 `/api/<chemin>`, nginx retire le préfixe et route vers FastAPI qui expose
 `<chemin>` à sa racine. Pas de CORS, pas d'URL d'API à configurer dans le front.
 
-### À propos de la base de données
-
-`tout-pris-back` utilise **SQLite** — un fichier unique dans le volume
-`db_data`, pas de serveur de base séparé. Il n'y a donc pas de service `db`
-dans `compose.yaml` : la « base » est le volume, et c'est lui qu'on sauvegarde.
-
-Une surcouche PostgreSQL est fournie dans
-[`compose.postgres.yaml`](compose.postgres.yaml), mais **elle ne peut pas
-fonctionner en l'état** : le code du backend est SQLite-only. Les trois
-modifications nécessaires côté `tout-pris-back` sont détaillées en tête de ce
-fichier.
+`tout-pris-back` stocke tout dans **SQLite** — un fichier unique dans le volume
+`db_data`, pas de serveur de base séparé. Il n'y a donc pas de service `db` :
+la « base » est ce volume, et c'est lui qu'on sauvegarde.
 
 ## Démarrage
 
 ```sh
-cp .env.example .env    # ajuster les tags d'images et les ports
-make up                 # ou : docker compose up -d
-make ps
+cp .env.example .env          # ajuster les tags d'images et les ports
+docker compose up -d
+docker compose ps
 ```
 
 Le site répond alors sur `http://localhost` (port configurable via
@@ -63,10 +55,9 @@ Le site répond alors sur `http://localhost` (port configurable via
 | `/healthz` | la santé du proxy |
 
 ```sh
-make logs           # tous les services
-make logs s=api     # un seul
-make down           # arrêt (les volumes sont conservés)
-make help           # toutes les cibles
+docker compose logs -f --tail=100          # tous les services
+docker compose logs -f --tail=100 api      # un seul
+docker compose down                        # arrêt (les volumes sont conservés)
 ```
 
 ## Configuration
@@ -91,7 +82,9 @@ rollbacks pénibles.
 ## Mise à jour
 
 ```sh
-make deploy    # docker compose pull && up -d --remove-orphans && ps
+docker compose pull
+docker compose up -d --remove-orphans
+docker compose ps
 ```
 
 Les migrations Alembic sont appliquées automatiquement au démarrage de l'API
@@ -121,10 +114,13 @@ Quelques choix qui méritent une explication :
 - **`limit_req zone=api`** — 20 req/s par IP avec une rafale de 40, pour éviter
   qu'un client unique sature l'API.
 
-Après toute modification :
+Après toute modification, vérifier la syntaxe **avant** de recharger — un
+`reload` sur une configuration invalide est refusé, mais autant le savoir tout
+de suite :
 
 ```sh
-make nginx-reload    # vérifie la syntaxe puis recharge sans couper les connexions
+docker compose exec nginx nginx -t
+docker compose exec nginx nginx -s reload    # recharge sans couper les connexions
 ```
 
 ### HTTPS
@@ -147,10 +143,10 @@ make nginx-reload    # vérifie la syntaxe puis recharge sans couper les connexi
    ```sh
    mv nginx/conf.d/tout-pris.conf nginx/conf.d/tout-pris.conf.disabled
    cp nginx/conf.d/tout-pris-tls.conf.example nginx/conf.d/tout-pris-tls.conf
-   make nginx-reload
+   docker compose exec nginx nginx -t && docker compose exec nginx nginx -s reload
    ```
 
-4. Programmer le renouvellement (`certbot renew` puis `make nginx-reload`) dans
+4. Programmer le renouvellement (`certbot renew` puis un `nginx -s reload`) dans
    une crontab de l'hôte.
 
 > Si la stack tourne derrière un proxy qui gère déjà le TLS (Traefik, Caddy,
@@ -159,20 +155,117 @@ make nginx-reload    # vérifie la syntaxe puis recharge sans couper les connexi
 
 ## Sauvegardes
 
-Le service `backup` produit une copie cohérente et compressée de la base dans
-`./backups`, toutes les `BACKUP_INTERVAL` secondes, avec vérification
-d'intégrité et rotation.
+Le service `backup` écrit dans `./backups` une copie datée, vérifiée et
+compressée de la base, toutes les `BACKUP_INTERVAL` secondes, en ne conservant
+que les `BACKUP_RETENTION` dernières.
 
 ```sh
-make backup     # sauvegarde immédiate
-make backups    # liste les archives
+docker compose run --rm backup once    # sauvegarde immédiate
+ls -lh backups/                        # archives disponibles
 ```
 
-**[`docs/BACKUP.md`](docs/BACKUP.md)** détaille les stratégies possibles
-(snapshots `sqlite3 .backup`, réplication continue Litestream, sauvegarde de
-volume, snapshots hébergeur, `pg_dump`/pgBackRest si migration PostgreSQL),
-la procédure de restauration, et ce qui compte plus que le choix de l'outil :
-hors-site, chiffrement, supervision et tests de restauration.
+Il utilise `sqlite3 .backup`, c'est-à-dire l'**API de sauvegarde en ligne** de
+SQLite : elle produit un fichier cohérent pendant que l'API continue d'écrire.
+Copier le `.db` à la main (`cp`, `tar`, `docker cp`) n'offre aucune garantie —
+les dernières transactions vivent dans le `-wal`, qui n'est pas copié
+atomiquement avec le fichier principal, et rien ne signale le problème au
+moment de la copie. Chaque archive est relue avec `PRAGMA integrity_check`
+avant d'être conservée, et n'est renommée sous son nom définitif qu'en cas de
+succès : le dossier ne contient donc jamais d'archive tronquée.
+
+Deux points restent à votre charge : les archives sont sur le **même disque**
+que la base — un `rclone`/`restic` vers un stockage distant depuis une crontab
+de l'hôte est le complément minimal — et `HEALTHCHECK_URL` doit pointer vers un
+service type [healthchecks.io](https://healthchecks.io), sans quoi une
+sauvegarde qui échoue le fait en silence.
+
+## Restaurer la base
+
+Procédure manuelle, à faire depuis le dossier du dépôt sur le serveur.
+
+**1. Choisir l'archive.**
+
+```sh
+ls -lh backups/
+# tout_pris-20260816T031500Z.sqlite.gz
+```
+
+**2. Arrêter tout ce qui écrit dans la base.** `nginx` peut rester en place, il
+renverra des 502 le temps de l'opération.
+
+```sh
+docker compose stop api backup
+```
+
+**3. Décompresser l'archive** (`-k` conserve le `.gz` d'origine). À faire
+maintenant, et pas plus tard : le fichier décompressé ne correspond plus au
+motif `*.sqlite.gz` de la rotation, donc la sauvegarde de l'étape 5 ne risque
+pas de le faire disparaître s'il était le plus ancien des `BACKUP_RETENTION`.
+
+```sh
+gunzip -k backups/tout_pris-20260816T031500Z.sqlite.gz
+```
+
+**4. Vérifier l'archive avant de toucher à la base.** Une restauration qui
+échoue après avoir écrasé la base en place est une double panne. Le `--no-deps`
+est nécessaire ici : sans lui, `docker compose run` relancerait `api`, qu'on
+vient justement d'arrêter.
+
+```sh
+docker compose run --rm --no-deps --entrypoint sqlite3 backup \
+  /backups/tout_pris-20260816T031500Z.sqlite 'PRAGMA integrity_check;'
+# doit afficher : ok
+```
+
+**5. Sauvegarder la base actuelle**, même si on la croit perdue : elle contient
+peut-être des écritures plus récentes que l'archive.
+
+```sh
+docker compose run --rm --no-deps backup once
+```
+
+Si cette commande échoue parce que la base est corrompue, copier quand même les
+trois fichiers en l'état — l'`api` étant arrêtée, ils forment un ensemble
+cohérent et un outil de réparation pourra encore en tirer quelque chose :
+
+```sh
+docker compose run --rm --no-deps --entrypoint sh backup -c \
+  'cp -a /data/tout_pris.db* /backups/ 2>/dev/null; ls -l /backups'
+```
+
+**6. Remettre l'archive en place.** Les fichiers `-wal` et `-shm` résiduels
+doivent impérativement être supprimés : ils appartiennent à l'ancienne base, et
+SQLite tenterait de rejouer un WAL qui ne correspond plus au fichier restauré.
+Le `chown 999:999` correspond à l'utilisateur non-root de l'image de production
+de `tout-pris-back`.
+
+```sh
+docker compose run --rm --no-deps --entrypoint sh backup -c '
+  rm -f /data/tout_pris.db /data/tout_pris.db-wal /data/tout_pris.db-shm &&
+  cp /backups/tout_pris-20260816T031500Z.sqlite /data/tout_pris.db &&
+  chown 999:999 /data/tout_pris.db &&
+  ls -l /data
+'
+```
+
+**7. Redémarrer et vérifier.**
+
+```sh
+docker compose up -d
+docker compose logs -f api        # les migrations Alembic se rejouent au démarrage
+curl -fsS http://localhost/api/health
+curl -fsS http://localhost/api/stufflists
+```
+
+Restaurer une archive plus ancienne que le code déployé ne pose pas de
+problème : l'API applique les migrations manquantes au démarrage
+(`command.upgrade(…, "head")` dans son `lifespan`). L'inverse — restaurer une
+base issue d'une version *plus récente* du backend — n'est pas géré, Alembic ne
+sachant pas redescendre tout seul.
+
+> Testez cette procédure au moins une fois **avant** d'en avoir besoin, sur une
+> pile jetable (`docker compose -p toutpris-restore-test up -d`). C'est le seul
+> moyen de savoir que vos archives sont exploitables.
 
 ## Développement local
 
