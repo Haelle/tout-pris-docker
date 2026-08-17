@@ -1,0 +1,10 @@
+[Unit]
+Description=Sauvegarde de la base SQLite de Tout Pris
+Documentation=https://github.com/Haelle/tout-pris-docker
+# Point d'accroche pour l'alerting : une unité de notification déclenchée
+# quand la sauvegarde échoue.
+# OnFailure=alerte@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/srv/tout-pris/ops/backup.sh

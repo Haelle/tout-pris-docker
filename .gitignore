@@ -1,14 +1,8 @@
-# Configuration locale (secrets, ports, tags d'images)
-.env
+# Base SQLite (bind mount du conteneur api)
+/data/
 
-# Sauvegardes produites par le service `backup`
-/backups/*
-!/backups/.gitkeep
+# Sauvegardes produites par ops/backup.sh
+/backups/
 
-# Certificats TLS
-/nginx/certs/*
-!/nginx/certs/.gitkeep
-
-# Divers
 *.log
 .DS_Store
