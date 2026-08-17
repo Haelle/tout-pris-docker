@@ -1,8 +1,5 @@
 # Base SQLite (bind mount du conteneur api)
 /data/
 
-# Sauvegardes produites par ops/backup.sh
-/backups/
-
 *.log
 .DS_Store

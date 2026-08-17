@@ -5,8 +5,13 @@ Déploiement de la stack **Tout Pris** : le backend
 front [`tout-pris-front`](https://github.com/Haelle/tout-pris-front) (SvelteKit
 statique).
 
-Ce dépôt ne contient pas de code applicatif : uniquement le `compose.yaml`, la
-configuration nginx à installer sur l'hôte, et les scripts de sauvegarde.
+Ce dépôt ne contient pas de code applicatif :
+
+| | |
+| --- | --- |
+| `compose.yaml` | les deux conteneurs applicatifs |
+| `nginx/` | le vhost à installer sur le nginx de l'hôte |
+| `backup/` | le script de sauvegarde, son timer systemd et sa rétention logrotate |
 
 ## Architecture
 
@@ -16,9 +21,9 @@ configuration nginx à installer sur l'hôte, et les scripts de sauvegarde.
                  └── /api/  ──▶ 127.0.0.1:8000  conteneur api (FastAPI)
                                                         │
                                                         ▼
-                                                  ./data/tout_pris.db
+                                            /srv/tout-pris/data/tout_pris.db
                                                         ▲
-                          systemd timer ──▶ ops/backup.sh ──▶ ./backups/
+                    systemd timer ──▶ backup.sh ──▶ /var/backups/tout-pris/
 ```
 
 Deux conteneurs seulement. **Le reverse proxy est le nginx de l'hôte**, pas un
@@ -30,15 +35,15 @@ Le front et l'API sont servis **depuis la même origine** : le SPA appelle
 `/api/<chemin>`, nginx retire le préfixe et route vers FastAPI qui expose
 `<chemin>` à sa racine. Pas de CORS, pas d'URL d'API à configurer dans le front.
 
-La base est un **SQLite** — un fichier dans `./data`, pas de serveur de base.
+La base est un **SQLite** — un fichier dans `data/`, pas de serveur de base.
 C'est un bind mount et non un volume nommé, pour que les scripts de l'hôte
 puissent le lire directement.
 
 ## Installation
 
 La suite suppose le dépôt déployé dans `/srv/tout-pris` ; si vous le mettez
-ailleurs, ajustez le chemin en tête de `ops/backup.sh`, `ops/restore.sh`,
-`ops/tout-pris-backup.service` et `ops/logrotate-tout-pris`.
+ailleurs, ajustez les chemins en tête de `backup/backup.sh`,
+`backup/tout-pris-backup.service` et `backup/logrotate-tout-pris`.
 
 ```sh
 sudo git clone https://github.com/Haelle/tout-pris-docker /srv/tout-pris
@@ -46,7 +51,7 @@ cd /srv/tout-pris
 
 # Le conteneur api tourne en 999:999 (utilisateur non-root de son image) et
 # doit pouvoir écrire dans le bind mount.
-sudo mkdir -p data backups
+sudo mkdir -p data
 sudo chown 999:999 data
 
 sudo docker compose up -d
@@ -76,8 +81,8 @@ déclenche, logrotate gère la rétention.
 ```sh
 sudo apt install sqlite3
 
-sudo cp ops/tout-pris-backup.service ops/tout-pris-backup.timer /etc/systemd/system/
-sudo cp ops/logrotate-tout-pris /etc/logrotate.d/tout-pris
+sudo cp backup/tout-pris-backup.service backup/tout-pris-backup.timer /etc/systemd/system/
+sudo cp backup/logrotate-tout-pris /etc/logrotate.d/tout-pris
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now tout-pris-backup.timer
@@ -89,15 +94,16 @@ Vérifier :
 sudo systemctl start tout-pris-backup.service   # déclenche une sauvegarde
 sudo systemctl status tout-pris-backup.service
 sudo systemctl list-timers tout-pris-backup.timer
-ls -lh /srv/tout-pris/backups/
+ls -lh /var/backups/tout-pris/
 sudo logrotate -d /etc/logrotate.d/tout-pris    # simulation, sans rien écrire
 ```
 
 ## Fonctionnement des sauvegardes
 
-`ops/backup.sh` produit `backups/tout_pris.sqlite.gz` — **toujours le même
-nom**. C'est logrotate qui le date et décide combien de copies conserver
-(`rotate 14` par défaut), plutôt qu'une logique de rétention dans le script.
+`backup/backup.sh` produit `/var/backups/tout-pris/tout_pris.sqlite.gz` —
+**toujours le même nom**. C'est logrotate qui le date et décide combien de
+copies conserver (`rotate 14` par défaut), plutôt qu'une logique de rétention
+dans le script.
 
 Le script utilise `sqlite3 .backup`, c'est-à-dire l'**API de sauvegarde en
 ligne** de SQLite : elle produit un fichier cohérent pendant que l'API continue
@@ -121,32 +127,86 @@ Deux points restent à votre charge :
 
 ## Restaurer la base
 
+Procédure manuelle. Chaque étape est vérifiable avant de passer à la suivante,
+et rien n'est écrasé avant que l'archive n'ait été validée.
+
+**1. Choisir l'archive.**
+
 ```sh
-ls -lh /srv/tout-pris/backups/
-sudo /srv/tout-pris/ops/restore.sh /srv/tout-pris/backups/tout_pris.sqlite.gz-20260817
+ls -lh /var/backups/tout-pris/
+# tout_pris.sqlite.gz            <- la plus récente
+# tout_pris.sqlite.gz-20260817   <- datées par logrotate
 ```
 
-Le script enchaîne : décompression dans un fichier de travail →
-`PRAGMA integrity_check` et **arrêt immédiat si l'archive est mauvaise, avant
-d'avoir touché à la base** → arrêt du conteneur `api` → mise de côté de la base
-courante dans `backups/avant-restauration-<horodatage>.sqlite.gz`, car même une
-base qu'on croit perdue peut contenir des écritures plus récentes que l'archive
-→ suppression des `-wal`/`-shm` résiduels, qui feraient rejouer à SQLite un
-journal ne correspondant plus au fichier restauré → installation de l'archive et
-`chown 999:999` → redémarrage de l'`api`.
-
-Sans argument, il liste les archives disponibles. Vérifier ensuite :
+**2. Arrêter l'API**, pour que plus personne n'écrive dans la base. nginx peut
+rester en place, il renverra des 502 le temps de l'opération.
 
 ```sh
-sudo docker compose -f /srv/tout-pris/compose.yaml logs -f api
+cd /srv/tout-pris
+sudo docker compose stop api
+```
+
+**3. Décompresser et vérifier l'archive.** On travaille sur une copie, et on
+valide *avant* de toucher à la base : une restauration qui échoue après avoir
+écrasé la base en place est une double panne.
+
+```sh
+gzip -dc /var/backups/tout-pris/tout_pris.sqlite.gz-20260817 > /tmp/restore.sqlite
+sqlite3 /tmp/restore.sqlite 'PRAGMA integrity_check;'   # doit répondre : ok
+```
+
+Ne continuez que si la réponse est exactement `ok`.
+
+**4. Mettre la base courante de côté.** Même une base qu'on croit perdue peut
+contenir des écritures plus récentes que l'archive. L'API étant arrêtée, les
+trois fichiers forment un ensemble cohérent et une copie simple suffit.
+
+```sh
+sudo mkdir -p /var/backups/tout-pris/avant-restauration
+sudo cp -a data/tout_pris.db* /var/backups/tout-pris/avant-restauration/
+```
+
+**5. Installer l'archive.** Les `-wal` et `-shm` résiduels appartiennent à
+l'ancienne base : les laisser ferait rejouer à SQLite un journal qui ne
+correspond plus au fichier restauré. Le `chown` rétablit l'utilisateur non-root
+de l'image, sans lequel l'API redémarre sur une base qu'elle ne peut pas écrire.
+
+```sh
+sudo rm -f data/tout_pris.db data/tout_pris.db-wal data/tout_pris.db-shm
+sudo cp /tmp/restore.sqlite data/tout_pris.db
+sudo chown 999:999 data/tout_pris.db
+sudo chmod 644 data/tout_pris.db
+```
+
+**6. Relancer et vérifier.**
+
+```sh
+sudo docker compose start api
+sudo docker compose logs -f api        # les migrations Alembic se rejouent ici
 curl -fsS https://VOTRE-DOMAINE/api/health
+curl -fsS https://VOTRE-DOMAINE/api/stufflists
 ```
 
-Restaurer une archive plus ancienne que le code déployé ne pose pas de
-problème : l'API applique les migrations Alembic manquantes au démarrage
-(`command.upgrade(…, "head")` dans son `lifespan`). L'inverse — une base issue
-d'une version *plus récente* du backend — n'est pas géré, Alembic ne sachant pas
-redescendre tout seul.
+Une fois la vérification faite, `rm /tmp/restore.sqlite`.
+
+### Ce qui peut mal se passer
+
+Points de vigilance, sans solution toute faite — chacun demande une décision au
+cas par cas :
+
+- **L'archive est corrompue** : l'`integrity_check` de l'étape 3 ne répond pas
+  `ok`. Le cas est attrapé avant tout écrasement, mais il faut alors une autre
+  archive.
+- **La base courante est elle-même illisible** au moment de l'étape 4.
+- **Le disque est plein** pendant la décompression : `/tmp/restore.sqlite` est
+  tronqué, et l'`integrity_check` peut passer sur un fichier incomplet.
+- **Un `docker compose up -d` est lancé pendant l'opération** : l'`api` est
+  recréée et se remet à écrire au milieu de la restauration.
+- **Les `-wal`/`-shm` de l'étape 5 sont oubliés** : SQLite rejoue un journal
+  orphelin au démarrage.
+- **Le `chown` est oublié** : l'API démarre mais échoue à la première écriture.
+- **L'archive vient d'une version plus récente du backend** : Alembic applique
+  les migrations manquantes vers l'avant, jamais vers l'arrière.
 
 > Testez cette procédure au moins une fois **avant** d'en avoir besoin. C'est le
 > seul moyen de savoir que vos archives sont exploitables.
