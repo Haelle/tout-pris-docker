@@ -41,9 +41,11 @@ puissent le lire directement.
 
 ## Installation
 
-La suite suppose le dépôt déployé dans `/srv/tout-pris` ; si vous le mettez
-ailleurs, ajustez les chemins en tête de `extra/backup/backup.sh`,
-`extra/backup/tout-pris-backup.service` et `extra/backup/logrotate-tout-pris`.
+La suite suppose le dépôt déployé dans `/srv/tout-pris`. Si vous le mettez
+ailleurs, deux fichiers sont à ajuster : `WorkingDirectory`/`ExecStart` dans
+`extra/backup/tout-pris-backup.service`, et le chemin dans
+`extra/backup/logrotate-tout-pris`. Le script de sauvegarde, lui, travaille en
+chemins relatifs et n'a rien à changer.
 
 ```sh
 sudo git clone https://github.com/Haelle/tout-pris-docker /srv/tout-pris
@@ -94,8 +96,14 @@ Vérifier :
 sudo systemctl start tout-pris-backup.service   # déclenche une sauvegarde
 sudo systemctl status tout-pris-backup.service
 sudo systemctl list-timers tout-pris-backup.timer
-ls -lh /srv/tout-pris/backups/
+ls -lh backups/
 sudo logrotate -d /etc/logrotate.d/tout-pris    # simulation, sans rien écrire
+```
+
+Hors systemd, le script se lance directement depuis la racine du dépôt :
+
+```sh
+sudo ./extra/backup/backup.sh
 ```
 
 ## Fonctionnement des sauvegardes
@@ -103,6 +111,9 @@ sudo logrotate -d /etc/logrotate.d/tout-pris    # simulation, sans rien écrire
 `extra/backup/backup.sh` produit `backups/tout_pris.sqlite.gz` — **toujours le
 même nom**. C'est logrotate qui le date et décide combien de copies conserver
 (`rotate 14` par défaut), plutôt qu'une logique de rétention dans le script.
+
+Le script travaille en chemins relatifs et attend d'être lancé depuis la racine
+du dépôt ; c'est `WorkingDirectory` dans l'unité systemd qui le garantit.
 
 Le script utilise `sqlite3 .backup`, c'est-à-dire l'**API de sauvegarde en
 ligne** de SQLite : elle produit un fichier cohérent pendant que l'API continue
@@ -132,7 +143,8 @@ et rien n'est écrasé avant que l'archive n'ait été validée.
 **1. Choisir l'archive.**
 
 ```sh
-ls -lh /srv/tout-pris/backups/
+cd /srv/tout-pris
+ls -lh backups/
 # tout_pris.sqlite.gz            <- la plus récente
 # tout_pris.sqlite.gz-20260817   <- datées par logrotate
 ```
@@ -141,7 +153,6 @@ ls -lh /srv/tout-pris/backups/
 rester en place, il renverra des 502 le temps de l'opération.
 
 ```sh
-cd /srv/tout-pris
 sudo docker compose stop api
 ```
 
@@ -150,7 +161,7 @@ valide *avant* de toucher à la base : une restauration qui échoue après avoir
 écrasé la base en place est une double panne.
 
 ```sh
-gzip -dc /srv/tout-pris/backups/tout_pris.sqlite.gz-20260817 > /tmp/restore.sqlite
+gzip -dc backups/tout_pris.sqlite.gz-20260817 > /tmp/restore.sqlite
 sqlite3 /tmp/restore.sqlite 'PRAGMA integrity_check;'   # doit répondre : ok
 ```
 
@@ -161,8 +172,8 @@ contenir des écritures plus récentes que l'archive. L'API étant arrêtée, le
 trois fichiers forment un ensemble cohérent et une copie simple suffit.
 
 ```sh
-sudo mkdir -p /srv/tout-pris/backups/avant-restauration
-sudo cp -a data/tout_pris.db* /srv/tout-pris/backups/avant-restauration/
+sudo mkdir -p backups/avant-restauration
+sudo cp -a data/tout_pris.db* backups/avant-restauration/
 ```
 
 **5. Installer l'archive.** Les `-wal` et `-shm` résiduels appartiennent à
