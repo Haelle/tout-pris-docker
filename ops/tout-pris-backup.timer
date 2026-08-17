@@ -1,0 +1,14 @@
+[Unit]
+Description=Sauvegarde quotidienne de la base Tout Pris
+
+[Timer]
+# 03:00 et non minuit : logrotate.timer tourne vers 00:00 et date la
+# sauvegarde de la veille. La rotation passe donc toujours avant l'écriture
+# du jour, et le fichier courant n'est jamais rotaté juste après sa création.
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=15m
+# Rattrape la sauvegarde si la machine était éteinte à l'heure dite.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

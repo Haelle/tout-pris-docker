@@ -1,0 +1,17 @@
+# Rétention des sauvegardes de Tout Pris.
+# À installer dans /etc/logrotate.d/tout-pris.
+#
+# backup.sh réécrit toujours le même fichier : c'est logrotate qui le date et
+# décide combien de copies conserver. Ajustez `rotate` selon la profondeur
+# d'historique voulue.
+
+/srv/tout-pris/backups/tout_pris.sqlite.gz {
+    daily
+    rotate 14
+    dateext
+    dateformat -%Y%m%d
+    # Déjà compressé par backup.sh.
+    nocompress
+    missingok
+    notifempty
+}

@@ -1,226 +1,62 @@
-# Stack Tout Pris — déploiement de production.
-#
-#   internet ──▶ nginx (80/443) ─┬─▶ front  (nginx:alpine, SPA statique)
-#                                └─▶ api    (uvicorn/FastAPI) ──▶ SQLite (volume db_data)
-#                                                                      ▲
-#                                                            backup ───┘ (snapshots .backup + gzip)
-#
-# Seul `nginx` publie des ports : `api` et `front` ne sont joignables que
-# depuis le réseau interne de la stack.
-#
-# Base de données : le backend utilise SQLite, un fichier unique dans le volume
-# `db_data`. Il n'y a donc pas de service `db` — la « base » est ce volume,
-# et c'est lui que le service `backup` sauvegarde.
+# Stack Tout Pris : les deux conteneurs applicatifs, rien d'autre.
+# Le reverse proxy est le nginx de l'hôte (nginx/tout-pris.conf) et les
+# sauvegardes sont des scripts lancés par systemd (ops/). Voir le README.
 
 name: tout-pris
 
-x-logging: &logging
-  driver: json-file
-  options:
-    max-size: "10m"
-    max-file: "5"
-
-# Watchtower (service commenté en fin de fichier) ne surveille que les
-# conteneurs portant ce label, grâce à WATCHTOWER_LABEL_ENABLE=true.
-x-watchtower-enable: &watchtower_enable
-  com.centurylinklabs.watchtower.enable: "true"
-
-# Base commune aux services qui manipulent la base : la boucle de sauvegarde et
-# les utilitaires ponctuels du profil `tools`. Même image, mêmes montages.
-x-db-tool: &db_tool
-  build: ./backup
-  image: tout-pris-backup:local
-  volumes:
-    # Monté en lecture-écriture volontairement : en mode WAL, SQLite doit
-    # pouvoir créer/ouvrir l'index partagé (-shm) même pour un simple
-    # lecteur. Un montage :ro ferait échouer la sauvegarde.
-    - db_data:/data
-    - ./backups:/backups
-  networks: [toutpris]
-  logging: *logging
-
 services:
-  # --- API FastAPI ----------------------------------------------------------
   api:
-    image: ${API_IMAGE:-estb/tout-pris-back}:${API_TAG:-latest}
+    image: estb/tout-pris-back:latest
     restart: unless-stopped
-    environment:
-      # Quatre slashes = chemin absolu : le fichier vit dans le volume db_data.
-      DATABASE_URL: ${DATABASE_URL:-sqlite:////data/tout_pris.db}
-    labels: *watchtower_enable
-    volumes:
-      - db_data:/data
-    # On surcharge la commande de l'image pour deux raisons :
-    #  - --root-path /api : FastAPI sait qu'il est monté derrière le préfixe
-    #    /api, donc /api/docs et /api/openapi.json fonctionnent à travers le
-    #    proxy (les routes JSON, elles, marchent avec ou sans).
-    #  - --proxy-headers : uvicorn fait confiance aux X-Forwarded-* posés par
-    #    nginx (schéma et IP client corrects dans les logs et les redirections).
-    command:
-      - uvicorn
-      - app.main:app
-      - --host=0.0.0.0
-      - --port=8000
-      - --root-path=/api
-      - --proxy-headers
-      # nginx est le seul à pouvoir joindre ce service, et son IP interne
-      # change à chaque recréation : on fait confiance au réseau de la stack.
-      - --forwarded-allow-ips=*
-    healthcheck:
-      # L'image de prod ne contient ni curl ni wget : on utilise Python.
-      test:
-        - CMD
-        - python
-        - -c
-        - |
-          import sys, urllib.request
-          sys.exit(0 if urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3).status == 200 else 1)
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-    networks: [toutpris]
-    logging: *logging
-
-  # --- Front SvelteKit (SPA statique servie par nginx) ----------------------
-  front:
-    image: ${FRONT_IMAGE:-estb/tout-pris-front}:${FRONT_TAG:-latest}
-    restart: unless-stopped
-    labels: *watchtower_enable
-    healthcheck:
-      # nginx:alpine embarque le wget de busybox.
-      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1/"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    networks: [toutpris]
-    logging: *logging
-
-  # --- Reverse proxy d'entrée ----------------------------------------------
-  nginx:
-    image: nginx:1.29-alpine
-    restart: unless-stopped
-    # Volontairement non labellisé : nginx est le seul service exposé, et une
-    # recréation automatique coupe toutes les connexions en cours. Décommentez
-    # si vous préférez que les correctifs de sécurité nginx arrivent seuls.
-    # labels: *watchtower_enable
+    # Publié sur la loopback : seul le nginx de l'hôte doit y accéder.
     ports:
-      - "${HTTP_PORT:-80}:80"
-      - "${HTTPS_PORT:-443}:443"
+      - "127.0.0.1:8000:8000"
+    environment:
+      DATABASE_URL: sqlite:////data/tout_pris.db
+    # Bind mount plutôt qu'un volume nommé : les scripts de sauvegarde de
+    # l'hôte lisent le fichier directement. Le dossier doit appartenir à
+    # 999:999, l'utilisateur non-root de l'image (voir README).
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/conf.d:/etc/nginx/conf.d:ro
-      - ./nginx/certs:/etc/nginx/certs:ro
-      - certbot_webroot:/var/www/certbot
-    depends_on:
-      api:
-        condition: service_healthy
-      front:
-        condition: service_healthy
+      - ./data:/data
+    # --root-path : FastAPI est monté derrière /api par le proxy, ce qui rend
+    # /api/docs correct. --proxy-headers : uvicorn lit les X-Forwarded-*.
+    command:
+      ["uvicorn", "app.main:app", "--host=0.0.0.0", "--port=8000",
+       "--root-path=/api", "--proxy-headers", "--forwarded-allow-ips=*"]
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1/healthz"]
-      interval: 15s
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
       timeout: 5s
-      retries: 5
-      start_period: 10s
-    networks: [toutpris]
-    logging: *logging
+      retries: 3
+      start_period: 30s
 
-  # --- Sauvegardes de la base ----------------------------------------------
-  # Snapshot cohérent à intervalle régulier, compressé et daté dans ./backups.
-  backup:
-    <<: *db_tool
+  front:
+    image: estb/tout-pris-front:latest
     restart: unless-stopped
-    environment:
-      BACKUP_DIR: /backups
-      BACKUP_INTERVAL: ${BACKUP_INTERVAL:-86400}
-      BACKUP_RETENTION: ${BACKUP_RETENTION:-14}
-      SQLITE_PATH: ${SQLITE_PATH:-/data/tout_pris.db}
-      HEALTHCHECK_URL: ${HEALTHCHECK_URL:-}
-    depends_on:
-      api:
-        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:80"
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
-  # --- Utilitaires ponctuels (profil `tools`) -------------------------------
-  # Ces deux services ne démarrent pas avec `docker compose up -d` : ils sont
-  # derrière un profil, et ne s'exécutent que si on les nomme explicitement.
-  # Ils tournent une fois puis s'arrêtent (`restart: "no"`).
-  #
-  #   docker compose up backup-once            -> sauvegarde immédiate
-  #   ARCHIVE=<fichier> docker compose up restore   -> restauration
-  #
-  # Volontairement sans `depends_on` : la restauration se fait `api` arrêtée.
-
-  backup-once:
-    <<: *db_tool
-    profiles: ["tools"]
-    restart: "no"
-    environment:
-      BACKUP_DIR: /backups
-      BACKUP_RETENTION: ${BACKUP_RETENTION:-14}
-      SQLITE_PATH: ${SQLITE_PATH:-/data/tout_pris.db}
-      HEALTHCHECK_URL: ${HEALTHCHECK_URL:-}
-    command: ["once"]
-
-  restore:
-    <<: *db_tool
-    profiles: ["tools"]
-    restart: "no"
-    environment:
-      # Nom du fichier à restaurer, dans ./backups. `.gz` accepté tel quel.
-      # Le script refuse de démarrer si la variable est vide.
-      ARCHIVE: ${ARCHIVE:-}
-      BACKUP_DIR: /backups
-      SQLITE_PATH: ${SQLITE_PATH:-/data/tout_pris.db}
-    entrypoint: ["/usr/local/bin/restore.sh"]
-    command: []
-
-  # --- Mises à jour automatiques (optionnel) --------------------------------
-  # Watchtower interroge le registre à intervalle régulier et recrée les
-  # conteneurs dont l'image a changé — ici uniquement `api` et `front`, les
-  # seuls à porter le label com.centurylinklabs.watchtower.enable.
-  #
-  # Trois choses à savoir avant de décommenter :
-  #
-  #  1. Il faut suivre un tag mobile : API_TAG/FRONT_TAG à `dev` (suit main) ou
-  #     `latest` (suit le dernier tag git). Avec un tag semver épinglé le digest
-  #     ne bouge jamais, et Watchtower ne fera donc jamais rien.
-  #  2. Monter le socket Docker donne au conteneur un accès équivalent à root
-  #     sur l'hôte. C'est le compromis inhérent à l'auto-update.
-  #  3. Le service `backup` est construit localement (pas de registre) : il ne
-  #     sera pas mis à jour, et n'a pas à l'être.
-  #
-  # La recréation d'un conteneur lui donne une nouvelle IP interne — c'est sans
-  # conséquence ici, la configuration nginx re-résolvant les noms de services à
-  # chaque requête (voir `resolver` dans nginx/nginx.conf).
-  #
+  # Mises à jour automatiques des deux images ci-dessus, seules à porter le
+  # label watchtower.enable. Décommenter pour activer : le socket Docker donne
+  # alors au conteneur un accès équivalent à root sur l'hôte.
   # watchtower:
-  #   image: containrrr/watchtower:1.7.1
+  #   image: containrrr/watchtower:latest
   #   restart: unless-stopped
   #   volumes:
   #     - /var/run/docker.sock:/var/run/docker.sock
   #   environment:
-  #     # N'agit que sur les conteneurs explicitement labellisés.
   #     WATCHTOWER_LABEL_ENABLE: "true"
-  #     # Cron à 6 champs (les secondes en premier) : tous les jours à 4 h.
   #     WATCHTOWER_SCHEDULE: "0 0 4 * * *"
-  #     # Supprime l'ancienne image après coup, sinon le disque se remplit.
   #     WATCHTOWER_CLEANUP: "true"
-  #     # Un conteneur à la fois plutôt que tous ensemble.
-  #     WATCHTOWER_ROLLING_RESTART: "true"
-  #     TZ: ${TZ:-Europe/Paris}
-  #     # Pour commencer en observation : signale les mises à jour sans les
-  #     # appliquer. Recommandé le temps de vérifier ce qui serait recréé.
-  #     # WATCHTOWER_MONITOR_ONLY: "true"
-  #     # Notifications via shoutrrr (Discord, Slack, Gotify, SMTP…).
-  #     # WATCHTOWER_NOTIFICATION_URL: ${WATCHTOWER_NOTIFICATION_URL:-}
-  #   networks: [toutpris]
-  #   logging: *logging
-
-volumes:
-  db_data:
-  certbot_webroot:
-
-networks:
-  toutpris:
+  #     TZ: Europe/Paris
