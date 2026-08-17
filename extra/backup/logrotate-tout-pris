@@ -4,6 +4,10 @@
 # backup.sh réécrit toujours le même fichier : c'est logrotate qui le date et
 # décide combien de copies conserver. Ajustez `rotate` selon la profondeur
 # d'historique voulue.
+#
+# Le chemin ci-dessous est absolu — logrotate n'a pas de notion de répertoire
+# courant, contrairement à backup.sh. À corriger si le dépôt n'est pas déployé
+# dans /srv/tout-pris.
 
 /srv/tout-pris/backups/tout_pris.sqlite.gz {
     daily

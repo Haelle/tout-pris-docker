@@ -7,4 +7,7 @@ Documentation=https://github.com/Haelle/tout-pris-docker
 
 [Service]
 Type=oneshot
+# Le script travaille en chemins relatifs : c'est ici que se règle l'endroit
+# où le dépôt est déployé. Les deux lignes suivantes sont les seules à ajuster.
+WorkingDirectory=/srv/tout-pris
 ExecStart=/srv/tout-pris/extra/backup/backup.sh

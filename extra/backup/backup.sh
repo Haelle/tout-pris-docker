@@ -1,17 +1,29 @@
 #!/bin/sh
 # Sauvegarde de la base SQLite de Tout Pris.
 #
-# Lancé par tout-pris-backup.timer. Écrit toujours le même fichier : la
-# rétention est laissée à logrotate (voir logrotate-tout-pris).
+# À lancer depuis la racine du dépôt :
+#
+#   ./extra/backup/backup.sh
+#
+# Les chemins sont relatifs au répertoire courant, pour que le script
+# fonctionne quel que soit l'endroit où le dépôt est déployé. C'est le service
+# systemd qui fixe le répertoire de travail (voir tout-pris-backup.service).
+#
+# Écrit toujours le même fichier : la rétention est laissée à logrotate
+# (voir logrotate-tout-pris).
 #
 # Dépendance : le paquet sqlite3.
 
 set -eu
 
-DB=/srv/tout-pris/data/tout_pris.db
-DEST=/srv/tout-pris/backups/tout_pris.sqlite.gz
+DB=data/tout_pris.db
+DEST=backups/tout_pris.sqlite.gz
 
-[ -f "$DB" ] || { echo "base introuvable : $DB" >&2; exit 1; }
+[ -f "$DB" ] || {
+    echo "base introuvable : $DB" >&2
+    echo "à lancer depuis la racine du dépôt : ./extra/backup/backup.sh" >&2
+    exit 1
+}
 mkdir -p "$(dirname "$DEST")"
 
 tmp="$DEST.tmp"
