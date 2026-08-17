@@ -1,6 +1,6 @@
 # Stack Tout Pris : les deux conteneurs applicatifs, rien d'autre.
-# Le reverse proxy est le nginx de l'hôte (nginx/) et les sauvegardes sont
-# lancées par systemd (backup/). Voir le README.
+# Le reverse proxy est le nginx de l'hôte (extra/nginx/) et les sauvegardes
+# sont lancées par systemd (extra/backup/). Voir le README.
 
 name: tout-pris
 

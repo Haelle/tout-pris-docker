@@ -9,7 +9,7 @@
 set -eu
 
 DB=/srv/tout-pris/data/tout_pris.db
-DEST=/var/backups/tout-pris/tout_pris.sqlite.gz
+DEST=/srv/tout-pris/backups/tout_pris.sqlite.gz
 
 [ -f "$DB" ] || { echo "base introuvable : $DB" >&2; exit 1; }
 mkdir -p "$(dirname "$DEST")"

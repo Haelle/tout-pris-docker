@@ -10,8 +10,8 @@ Ce dépôt ne contient pas de code applicatif :
 | | |
 | --- | --- |
 | `compose.yaml` | les deux conteneurs applicatifs |
-| `nginx/` | le vhost à installer sur le nginx de l'hôte |
-| `backup/` | le script de sauvegarde, son timer systemd et sa rétention logrotate |
+| `extra/nginx/` | le vhost à installer sur le nginx de l'hôte |
+| `extra/backup/` | le script de sauvegarde, son timer systemd et sa rétention logrotate |
 
 ## Architecture
 
@@ -23,7 +23,7 @@ Ce dépôt ne contient pas de code applicatif :
                                                         ▼
                                             /srv/tout-pris/data/tout_pris.db
                                                         ▲
-                    systemd timer ──▶ backup.sh ──▶ /var/backups/tout-pris/
+                    systemd timer ──▶ backup.sh ──▶ /srv/tout-pris/backups/
 ```
 
 Deux conteneurs seulement. **Le reverse proxy est le nginx de l'hôte**, pas un
@@ -42,8 +42,8 @@ puissent le lire directement.
 ## Installation
 
 La suite suppose le dépôt déployé dans `/srv/tout-pris` ; si vous le mettez
-ailleurs, ajustez les chemins en tête de `backup/backup.sh`,
-`backup/tout-pris-backup.service` et `backup/logrotate-tout-pris`.
+ailleurs, ajustez les chemins en tête de `extra/backup/backup.sh`,
+`extra/backup/tout-pris-backup.service` et `extra/backup/logrotate-tout-pris`.
 
 ```sh
 sudo git clone https://github.com/Haelle/tout-pris-docker /srv/tout-pris
@@ -51,7 +51,7 @@ cd /srv/tout-pris
 
 # Le conteneur api tourne en 999:999 (utilisateur non-root de son image) et
 # doit pouvoir écrire dans le bind mount.
-sudo mkdir -p data
+sudo mkdir -p data backups
 sudo chown 999:999 data
 
 sudo docker compose up -d
@@ -61,7 +61,7 @@ sudo docker compose ps
 ### nginx
 
 ```sh
-sudo cp nginx/tout-pris.conf /etc/nginx/sites-available/tout-pris
+sudo cp extra/nginx/tout-pris.conf /etc/nginx/sites-available/tout-pris
 sudo sed -i 's/tout-pris.example.com/VOTRE-DOMAINE/' /etc/nginx/sites-available/tout-pris
 sudo ln -s /etc/nginx/sites-available/tout-pris /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
@@ -81,8 +81,8 @@ déclenche, logrotate gère la rétention.
 ```sh
 sudo apt install sqlite3
 
-sudo cp backup/tout-pris-backup.service backup/tout-pris-backup.timer /etc/systemd/system/
-sudo cp backup/logrotate-tout-pris /etc/logrotate.d/tout-pris
+sudo cp extra/backup/tout-pris-backup.service extra/backup/tout-pris-backup.timer /etc/systemd/system/
+sudo cp extra/backup/logrotate-tout-pris /etc/logrotate.d/tout-pris
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now tout-pris-backup.timer
@@ -94,16 +94,15 @@ Vérifier :
 sudo systemctl start tout-pris-backup.service   # déclenche une sauvegarde
 sudo systemctl status tout-pris-backup.service
 sudo systemctl list-timers tout-pris-backup.timer
-ls -lh /var/backups/tout-pris/
+ls -lh /srv/tout-pris/backups/
 sudo logrotate -d /etc/logrotate.d/tout-pris    # simulation, sans rien écrire
 ```
 
 ## Fonctionnement des sauvegardes
 
-`backup/backup.sh` produit `/var/backups/tout-pris/tout_pris.sqlite.gz` —
-**toujours le même nom**. C'est logrotate qui le date et décide combien de
-copies conserver (`rotate 14` par défaut), plutôt qu'une logique de rétention
-dans le script.
+`extra/backup/backup.sh` produit `backups/tout_pris.sqlite.gz` — **toujours le
+même nom**. C'est logrotate qui le date et décide combien de copies conserver
+(`rotate 14` par défaut), plutôt qu'une logique de rétention dans le script.
 
 Le script utilise `sqlite3 .backup`, c'est-à-dire l'**API de sauvegarde en
 ligne** de SQLite : elle produit un fichier cohérent pendant que l'API continue
@@ -133,7 +132,7 @@ et rien n'est écrasé avant que l'archive n'ait été validée.
 **1. Choisir l'archive.**
 
 ```sh
-ls -lh /var/backups/tout-pris/
+ls -lh /srv/tout-pris/backups/
 # tout_pris.sqlite.gz            <- la plus récente
 # tout_pris.sqlite.gz-20260817   <- datées par logrotate
 ```
@@ -151,7 +150,7 @@ valide *avant* de toucher à la base : une restauration qui échoue après avoir
 écrasé la base en place est une double panne.
 
 ```sh
-gzip -dc /var/backups/tout-pris/tout_pris.sqlite.gz-20260817 > /tmp/restore.sqlite
+gzip -dc /srv/tout-pris/backups/tout_pris.sqlite.gz-20260817 > /tmp/restore.sqlite
 sqlite3 /tmp/restore.sqlite 'PRAGMA integrity_check;'   # doit répondre : ok
 ```
 
@@ -162,8 +161,8 @@ contenir des écritures plus récentes que l'archive. L'API étant arrêtée, le
 trois fichiers forment un ensemble cohérent et une copie simple suffit.
 
 ```sh
-sudo mkdir -p /var/backups/tout-pris/avant-restauration
-sudo cp -a data/tout_pris.db* /var/backups/tout-pris/avant-restauration/
+sudo mkdir -p /srv/tout-pris/backups/avant-restauration
+sudo cp -a data/tout_pris.db* /srv/tout-pris/backups/avant-restauration/
 ```
 
 **5. Installer l'archive.** Les `-wal` et `-shm` résiduels appartiennent à
