@@ -7,4 +7,4 @@ Documentation=https://github.com/Haelle/tout-pris-docker
 
 [Service]
 Type=oneshot
-ExecStart=/srv/tout-pris/backup/backup.sh
+ExecStart=/srv/tout-pris/extra/backup/backup.sh

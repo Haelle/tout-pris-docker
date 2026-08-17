@@ -5,7 +5,7 @@
 # décide combien de copies conserver. Ajustez `rotate` selon la profondeur
 # d'historique voulue.
 
-/var/backups/tout-pris/tout_pris.sqlite.gz {
+/srv/tout-pris/backups/tout_pris.sqlite.gz {
     daily
     rotate 14
     dateext
