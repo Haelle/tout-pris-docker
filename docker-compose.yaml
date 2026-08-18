@@ -6,11 +6,12 @@ name: tout-pris
 
 services:
   api:
-    image: estb/tout-pris-back:latest
+    container_name: tout-pris-api
+    image: estb/tout-pris-back:dev
     restart: unless-stopped
     # Publié sur la loopback : seul le nginx de l'hôte doit y accéder.
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8100:8000"
     environment:
       DATABASE_URL: sqlite:////data/tout_pris.db
     # Bind mount plutôt qu'un volume nommé : les scripts de sauvegarde de
@@ -34,10 +35,11 @@ services:
       start_period: 30s
 
   front:
-    image: estb/tout-pris-front:latest
+    container_name: tout-pris-front
+    image: estb/tout-pris-front:dev
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8080:80"
+      - "127.0.0.1:8180:80"
     labels:
       com.centurylinklabs.watchtower.enable: "true"
     healthcheck:
