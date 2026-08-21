@@ -1,3 +1,6 @@
+# Configuration de l'API : clé Django et clé Brevo, jamais versionnées.
+/.env
+
 # Base SQLite (bind mount du conteneur api)
 /data/
 
