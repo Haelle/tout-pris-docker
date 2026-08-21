@@ -1,15 +1,16 @@
 # tout-pris-docker
 
 Déploiement de la stack **Tout Pris** : le backend
-[`tout-pris-back`](https://github.com/Haelle/tout-pris-back) (FastAPI) et le
-front [`tout-pris-front`](https://github.com/Haelle/tout-pris-front) (SvelteKit
+[`tout-pris-back`](https://github.com/Haelle/tout-pris-back) (Django, servi par
+gunicorn) et le front
+[`tout-pris-front`](https://github.com/Haelle/tout-pris-front) (SvelteKit
 statique).
 
 Ce dépôt ne contient pas de code applicatif :
 
 | | |
 | --- | --- |
-| `compose.yaml` | les deux conteneurs applicatifs |
+| `docker-compose.yaml` | les deux conteneurs applicatifs |
 | `extra/nginx/` | le vhost à installer sur le nginx de l'hôte |
 | `extra/backup/` | le script de sauvegarde, son timer systemd et sa rétention logrotate |
 
@@ -17,8 +18,11 @@ Ce dépôt ne contient pas de code applicatif :
 
 ```
   internet ──▶ nginx (hôte, 80/443)
-                 ├── /      ──▶ 127.0.0.1:8080  conteneur front (SPA)
-                 └── /api/  ──▶ 127.0.0.1:8000  conteneur api (FastAPI)
+                 ├── /          ──▶ 127.0.0.1:8180  conteneur front (SPA)
+                 ├── /api/      ─┐
+                 ├── /admin/    ─┤
+                 ├── /accounts/ ─┼▶ 127.0.0.1:8100  conteneur api (Django)
+                 └── /static/   ─┘
                                                         │
                                                         ▼
                                             /srv/tout-pris/data/tout_pris.db
@@ -32,8 +36,14 @@ le sont déjà. Les deux ports sont publiés sur la loopback, donc inaccessibles
 depuis l'extérieur autrement que par nginx.
 
 Le front et l'API sont servis **depuis la même origine** : le SPA appelle
-`/api/<chemin>`, nginx retire le préfixe et route vers FastAPI qui expose
-`<chemin>` à sa racine. Pas de CORS, pas d'URL d'API à configurer dans le front.
+`/api/<chemin>` et nginx transmet le chemin tel quel à Django, qui monte
+lui-même ses routes sous `/api/`. Pas de CORS, pas d'URL d'API à configurer dans
+le front, et les cookies de session et de CSRF d'un même domaine.
+
+Django ne se contente pas de `/api/` : le vhost route aussi `/admin/` (l'admin
+Django), `/accounts/` (les callbacks OAuth des fournisseurs externes) et
+`/static/` (les fichiers statiques, servis par WhiteNoise depuis le processus
+applicatif, pas depuis le disque de l'hôte). Tout le reste va au front.
 
 La base est un **SQLite** — un fichier dans `data/`, pas de serveur de base.
 C'est un bind mount et non un volume nommé, pour que les scripts de l'hôte
@@ -55,10 +65,52 @@ cd /srv/tout-pris
 # doit pouvoir écrire dans le bind mount.
 sudo mkdir -p data backups
 sudo chown 999:999 data
+```
 
+### Configuration
+
+Le backend Django lit sa configuration dans l'environnement. `docker compose`
+la prend dans un fichier `.env` à la racine du dépôt, que git ignore :
+
+```sh
+sudo tee /srv/tout-pris/.env > /dev/null <<'EOF'
+DJANGO_SECRET_KEY=REMPLACEZ-MOI
+DJANGO_ALLOWED_HOSTS=VOTRE-DOMAINE
+FRONTEND_URL=https://VOTRE-DOMAINE
+BREVO_API_KEY=REMPLACEZ-MOI
+MAIL_FROM_EMAIL=no-reply@tout-pris.app
+MAIL_FROM_NAME=Tout Pris
+EOF
+sudo chmod 600 /srv/tout-pris/.env
+```
+
+| Variable | Rôle |
+| --- | --- |
+| `DJANGO_SECRET_KEY` | Signe les sessions et les jetons envoyés par e-mail. `openssl rand -base64 48` en produit une. La changer déconnecte tout le monde et invalide les liens de vérification en circulation. |
+| `DJANGO_ALLOWED_HOSTS` | Le domaine public. Django répond 400 à toute requête portant un autre `Host`. Le compose y ajoute `127.0.0.1` pour son propre *healthcheck*. |
+| `FRONTEND_URL` | L'URL publique du front : c'est vers elle que pointent les liens des e-mails de vérification d'adresse et de mot de passe oublié. |
+| `BREVO_API_KEY` | La clé Brevo, par où partent les e-mails transactionnels. |
+| `MAIL_FROM_EMAIL` | L'expéditeur, qui doit être une adresse validée dans Brevo. |
+| `MAIL_FROM_NAME` | Le nom affiché de l'expéditeur. |
+
+Les quatre premières n'ont pas de valeur par défaut : sans elles, `docker
+compose up` s'arrête en nommant celle qui manque plutôt que de démarrer une API
+mal configurée. `DJANGO_DEBUG` est fixé à `false` dans le compose et n'a rien à
+faire dans le `.env` — c'est lui qui active les cookies `Secure`, la
+redirection HTTPS et le HSTS.
+
+La liste complète des variables lues par l'image est dans le
+[README du backend](https://github.com/Haelle/tout-pris-back#configuration).
+
+### Démarrage
+
+```sh
 sudo docker compose up -d
 sudo docker compose ps
 ```
+
+Les migrations Django sont appliquées par l'entrypoint de l'image à chaque
+démarrage du conteneur.
 
 ### nginx
 
@@ -192,9 +244,9 @@ sudo chmod 644 data/tout_pris.db
 
 ```sh
 sudo docker compose start api
-sudo docker compose logs -f api        # les migrations Alembic se rejouent ici
-curl -fsS https://VOTRE-DOMAINE/api/health
-curl -fsS https://VOTRE-DOMAINE/api/stufflists
+sudo docker compose logs -f api        # les migrations Django se rejouent ici
+curl -fsS https://VOTRE-DOMAINE/api/health/
+curl -sS -o /dev/null -w '%{http_code}\n' https://VOTRE-DOMAINE/api/households/   # 401 : l'API répond et exige une session
 ```
 
 Une fois la vérification faite, `rm /tmp/restore.sqlite`.
@@ -215,8 +267,8 @@ cas par cas :
 - **Les `-wal`/`-shm` de l'étape 5 sont oubliés** : SQLite rejoue un journal
   orphelin au démarrage.
 - **Le `chown` est oublié** : l'API démarre mais échoue à la première écriture.
-- **L'archive vient d'une version plus récente du backend** : Alembic applique
-  les migrations manquantes vers l'avant, jamais vers l'arrière.
+- **L'archive vient d'une version plus récente du backend** : les migrations
+  Django manquantes sont appliquées vers l'avant, jamais vers l'arrière.
 
 > Testez cette procédure au moins une fois **avant** d'en avoir besoin. C'est le
 > seul moyen de savoir que vos archives sont exploitables.
@@ -228,10 +280,11 @@ sudo docker compose pull
 sudo docker compose up -d
 ```
 
-Les migrations Alembic sont appliquées automatiquement au démarrage de l'API.
+Les migrations Django sont appliquées automatiquement au démarrage de l'API,
+par l'entrypoint de l'image.
 
 Pour que ce soit automatique, un service `watchtower` est fourni **commenté** en
-fin de `compose.yaml` : `api` et `front` portent déjà le label
+fin de `docker-compose.yaml` : `api` et `front` portent déjà le label
 `com.centurylinklabs.watchtower.enable`, et `WATCHTOWER_LABEL_ENABLE` restreint
 Watchtower à eux seuls. Deux points avant de l'activer : le socket Docker donne
 au conteneur un accès équivalent à root sur l'hôte, et une nouvelle image du
@@ -243,7 +296,15 @@ backend peut embarquer une migration appliquée sans supervision au redémarrage
 sudo docker compose ps
 sudo docker compose logs -f api
 sudo docker compose down
+
+# L'admin Django, servi sur https://VOTRE-DOMAINE/admin/, demande un compte
+# superutilisateur — il n'en existe aucun au premier démarrage.
+sudo docker compose exec api python manage.py createsuperuser
 ```
+
+L'admin est exposé publiquement, protégé par le seul mot de passe de ce compte.
+Le restreindre davantage — filtrage par IP, authentification supplémentaire — se
+fait dans le bloc `location /admin/` du vhost.
 
 La rotation des logs Docker n'est pas configurée ici : elle relève du démon, via
 `log-opts` dans `/etc/docker/daemon.json`.

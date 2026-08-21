@@ -1,6 +1,11 @@
 # Stack Tout Pris : les deux conteneurs applicatifs, rien d'autre.
 # Le reverse proxy est le nginx de l'hôte (extra/nginx/) et les sauvegardes
 # sont lancées par systemd (extra/backup/). Voir le README.
+#
+# Les variables sans valeur par défaut ci-dessous sont lues dans le fichier
+# .env à côté de ce fichier, que git ignore. Le `:?` fait échouer le
+# `docker compose up` avec le message indiqué plutôt que de démarrer une API
+# mal configurée.
 
 name: tout-pris
 
@@ -14,21 +19,44 @@ services:
       - "127.0.0.1:8100:8000"
     environment:
       DATABASE_URL: sqlite:////data/tout_pris.db
+      DJANGO_DEBUG: "false"
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?générez-en une, par exemple avec openssl rand -base64 48}
+      # Le domaine public servi par le nginx de l'hôte. 127.0.0.1 est ajouté
+      # ici et pas dans le .env : c'est l'adresse que le healthcheck ci-dessous
+      # appelle depuis l'intérieur du conteneur, et Django rejette en 400 tout
+      # Host absent de cette liste.
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:?le domaine public de l'application},127.0.0.1
+      # URL publique du front : c'est vers elle que pointent les liens des
+      # e-mails de vérification d'adresse et de mot de passe oublié.
+      FRONTEND_URL: ${FRONTEND_URL:?l'URL publique du front, https://VOTRE-DOMAINE}
+      # Sans clé Brevo, Django refuse de démarrer avec DJANGO_DEBUG=false
+      # plutôt que d'écrire les e-mails dans les logs.
+      BREVO_API_KEY: ${BREVO_API_KEY:?la clé Brevo, sans laquelle les e-mails ne partent pas}
+      MAIL_FROM_EMAIL: ${MAIL_FROM_EMAIL:-no-reply@tout-pris.app}
+      MAIL_FROM_NAME: ${MAIL_FROM_NAME:-Tout Pris}
+      # gunicorn n'accorde foi aux X-Forwarded-* que s'ils viennent d'une
+      # adresse de confiance, 127.0.0.1 par défaut. Or les requêtes du nginx de
+      # l'hôte entrent dans le conteneur par la passerelle du réseau Docker, et
+      # non par la loopback : sans cette variable, X-Forwarded-Proto est ignoré,
+      # Django se croit en clair et SECURE_SSL_REDIRECT boucle sur des 301 vers
+      # https. Le port n'étant publié que sur la loopback de l'hôte, aucun
+      # client extérieur ne peut atteindre gunicorn autrement que par nginx.
+      FORWARDED_ALLOW_IPS: "*"
     # Bind mount plutôt qu'un volume nommé : les scripts de sauvegarde de
     # l'hôte lisent le fichier directement. Le dossier doit appartenir à
     # 999:999, l'utilisateur non-root de l'image (voir README).
     volumes:
       - ./data:/data
-    # --root-path : FastAPI est monté derrière /api par le proxy, ce qui rend
-    # /api/docs correct. --proxy-headers : uvicorn lit les X-Forwarded-*.
-    command:
-      ["uvicorn", "app.main:app", "--host=0.0.0.0", "--port=8000",
-       "--root-path=/api", "--proxy-headers", "--forwarded-allow-ips=*"]
+    # Pas de `command` : l'image lance gunicorn elle-même, après avoir appliqué
+    # les migrations Django dans son entrypoint.
     labels:
       com.centurylinklabs.watchtower.enable: "true"
+    # X-Forwarded-Proto est nécessaire ici aussi : sans lui SECURE_SSL_REDIRECT
+    # répond une 301 vers https://127.0.0.1/, que urlopen suit jusqu'au refus
+    # de connexion — le conteneur serait éternellement unhealthy.
     healthcheck:
       test: ["CMD", "python", "-c",
-             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+             "import urllib.request as u; u.urlopen(u.Request('http://127.0.0.1:8000/api/health/', headers={'X-Forwarded-Proto': 'https'}), timeout=3)"]
       interval: 30s
       timeout: 5s
       retries: 3
