@@ -89,7 +89,7 @@ sudo chmod 600 /srv/tout-pris/.env
 | `DJANGO_SECRET_KEY` | Signe les sessions et les jetons envoyés par e-mail. `openssl rand -base64 48` en produit une. La changer déconnecte tout le monde et invalide les liens de vérification en circulation. |
 | `DJANGO_ALLOWED_HOSTS` | Le domaine public. Django répond 400 à toute requête portant un autre `Host`. Le compose y ajoute `127.0.0.1` pour son propre *healthcheck*. |
 | `FRONTEND_URL` | L'URL publique du front : c'est vers elle que pointent les liens des e-mails de vérification d'adresse et de mot de passe oublié. |
-| `BREVO_API_KEY` | La clé Brevo, par où partent les e-mails transactionnels. |
+| `BREVO_API_KEY` | La clé Brevo, par où partent les e-mails transactionnels. Sans elle, Django refuse de démarrer avec `DJANGO_DEBUG=false` plutôt que d'écrire les e-mails dans les logs. |
 | `MAIL_FROM_EMAIL` | L'expéditeur, qui doit être une adresse validée dans Brevo. |
 | `MAIL_FROM_NAME` | Le nom affiché de l'expéditeur. |
 
@@ -157,6 +157,61 @@ Hors systemd, le script se lance directement depuis la racine du dépôt :
 ```sh
 sudo ./extra/backup/backup.sh
 ```
+
+## Fonctionnement du compose
+
+`docker-compose.yaml` ne décrit que les deux conteneurs applicatifs, et ne porte
+aucun commentaire : ce qu'il faut savoir pour le relire est ici.
+
+Il ne construit aucune image et ne dicte aucune commande. L'image publiée
+`estb/tout-pris-back` démarre gunicorn d'elle-même, après avoir appliqué les
+migrations Django dans son entrypoint — d'où l'absence de `build`, de `command`
+et de toute étape de migration. Le compose ne fait que la configurer, lui donner
+un volume et publier son port.
+
+Les deux ports sont publiés sur `127.0.0.1` et non sur toutes les interfaces :
+`8100` pour l'API (`8000` dans le conteneur) et `8180` pour le front (`80`).
+Seul le nginx de l'hôte peut donc les atteindre, et ce sont ces deux numéros que
+reprennent les `upstream` du vhost. La base, elle, est montée en `./data`
+plutôt que dans un volume nommé, pour que `backup.sh` lise le fichier
+directement depuis l'hôte ; le dossier doit appartenir à `999:999`,
+l'utilisateur non-root de l'image.
+
+Le service `watchtower` commenté en fin de fichier est décrit plus bas, dans
+[Mise à jour](#mise-à-jour).
+
+### `FORWARDED_ALLOW_IPS`
+
+C'est la variable la moins évidente du fichier, et celle sans laquelle le site
+entier part en boucle de redirection.
+
+Le backend ne définit pas `SECURE_PROXY_SSL_HEADER` : c'est donc gunicorn qui
+décide si Django se croit en HTTPS, en traduisant l'en-tête `X-Forwarded-Proto`
+que pose le vhost. Or gunicorn n'accorde foi à cet en-tête que s'il vient d'une
+adresse de confiance — `127.0.0.1` par défaut. Les requêtes de nginx entrent
+dans le conteneur par la passerelle du réseau Docker et non par la loopback :
+l'en-tête est donc ignoré, et Django se croit en clair derrière le TLS. Comme
+`SECURE_SSL_REDIRECT` est actif dès que `DJANGO_DEBUG` vaut `false`, chaque
+requête repart alors en 301 vers `https`, c'est-à-dire vers nginx, qui la
+repasse à Django, qui la redirige encore : une boucle de redirection sur la
+totalité du site.
+
+`FORWARDED_ALLOW_IPS: "*"` lève la restriction. Le port n'étant publié que sur
+la loopback de l'hôte, aucun client extérieur ne peut atteindre gunicorn
+autrement qu'à travers nginx, qui réécrit `X-Forwarded-Proto` à chaque requête :
+personne n'est en position de mentir sur le protocole.
+
+### Le healthcheck de l'API
+
+Il appelle `/api/health/` — et non `/health`, qui était le chemin du temps de
+FastAPI — en se déclarant lui-même en HTTPS, faute de quoi la redirection
+ci-dessus l'enverrait vers `https://127.0.0.1/`, où rien n'écoute : il
+échouerait à chaque passage et le conteneur resterait indéfiniment `unhealthy`.
+
+C'est aussi pour lui que le compose ajoute `127.0.0.1` à
+`DJANGO_ALLOWED_HOSTS`, plutôt que de le laisser au `.env` : la requête part
+avec `Host: 127.0.0.1`, que Django rejetterait en 400 s'il ne figurait pas dans
+la liste.
 
 ## Fonctionnement des sauvegardes
 
