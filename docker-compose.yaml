@@ -3,7 +3,7 @@ name: tout-pris
 services:
   api:
     container_name: tout-pris-api
-    image: estb/tout-pris-back:dev
+    image: estb/tout-pris-api:dev
     restart: unless-stopped
     ports:
       - "127.0.0.1:8100:8000"
