@@ -1,9 +1,9 @@
 # tout-pris-docker
 
-Déploiement de la stack **Tout Pris** : le backend
-[`tout-pris-back`](https://github.com/Haelle/tout-pris-back) (Django, servi par
-gunicorn) et le front
-[`tout-pris-front`](https://github.com/Haelle/tout-pris-front) (SvelteKit
+Déploiement de la stack **Tout Pris** : l'API
+[`tout-pris-api`](https://github.com/AxineTeam/tout-pris-api) (Django, servie
+par gunicorn) et le front
+[`tout-pris-front`](https://github.com/AxineTeam/tout-pris-front) (SvelteKit
 statique).
 
 Ce dépôt ne contient pas de code applicatif :
@@ -58,7 +58,7 @@ ailleurs, deux fichiers sont à ajuster : `WorkingDirectory`/`ExecStart` dans
 chemins relatifs et n'a rien à changer.
 
 ```sh
-sudo git clone https://github.com/Haelle/tout-pris-docker /srv/tout-pris
+sudo git clone https://github.com/AxineTeam/tout-pris-docker /srv/tout-pris
 cd /srv/tout-pris
 
 # Le conteneur api tourne en 999:999 (utilisateur non-root de son image) et
@@ -69,7 +69,7 @@ sudo chown 999:999 data
 
 ### Configuration
 
-Le backend Django lit sa configuration dans l'environnement. `docker compose`
+L'API Django lit sa configuration dans l'environnement. `docker compose`
 la prend dans un fichier `.env` à la racine du dépôt, que git ignore :
 
 ```sh
@@ -100,7 +100,7 @@ faire dans le `.env` — c'est lui qui active les cookies `Secure`, la
 redirection HTTPS et le HSTS.
 
 La liste complète des variables lues par l'image est dans le
-[README du backend](https://github.com/Haelle/tout-pris-back#configuration).
+[README de l'API](https://github.com/AxineTeam/tout-pris-api#configuration).
 
 ### Démarrage
 
@@ -164,7 +164,7 @@ sudo ./extra/backup/backup.sh
 aucun commentaire : ce qu'il faut savoir pour le relire est ici.
 
 Il ne construit aucune image et ne dicte aucune commande. L'image publiée
-`estb/tout-pris-back` démarre gunicorn d'elle-même, après avoir appliqué les
+`estb/tout-pris-api` démarre gunicorn d'elle-même, après avoir appliqué les
 migrations Django dans son entrypoint — d'où l'absence de `build`, de `command`
 et de toute étape de migration. Le compose ne fait que la configurer, lui donner
 un volume et publier son port.
@@ -185,7 +185,7 @@ Le service `watchtower` commenté en fin de fichier est décrit plus bas, dans
 C'est la variable la moins évidente du fichier, et celle sans laquelle le site
 entier part en boucle de redirection.
 
-Le backend ne définit pas `SECURE_PROXY_SSL_HEADER` : c'est donc gunicorn qui
+L'API ne définit pas `SECURE_PROXY_SSL_HEADER` : c'est donc gunicorn qui
 décide si Django se croit en HTTPS, en traduisant l'en-tête `X-Forwarded-Proto`
 que pose le vhost. Or gunicorn n'accorde foi à cet en-tête que s'il vient d'une
 adresse de confiance — `127.0.0.1` par défaut. Les requêtes de nginx entrent
@@ -322,7 +322,7 @@ cas par cas :
 - **Les `-wal`/`-shm` de l'étape 5 sont oubliés** : SQLite rejoue un journal
   orphelin au démarrage.
 - **Le `chown` est oublié** : l'API démarre mais échoue à la première écriture.
-- **L'archive vient d'une version plus récente du backend** : les migrations
+- **L'archive vient d'une version plus récente de l'API** : les migrations
   Django manquantes sont appliquées vers l'avant, jamais vers l'arrière.
 
 > Testez cette procédure au moins une fois **avant** d'en avoir besoin. C'est le
@@ -342,8 +342,8 @@ Pour que ce soit automatique, un service `watchtower` est fourni **commenté** e
 fin de `docker-compose.yaml` : `api` et `front` portent déjà le label
 `com.centurylinklabs.watchtower.enable`, et `WATCHTOWER_LABEL_ENABLE` restreint
 Watchtower à eux seuls. Deux points avant de l'activer : le socket Docker donne
-au conteneur un accès équivalent à root sur l'hôte, et une nouvelle image du
-backend peut embarquer une migration appliquée sans supervision au redémarrage.
+au conteneur un accès équivalent à root sur l'hôte, et une nouvelle image de
+l'API peut embarquer une migration appliquée sans supervision au redémarrage.
 
 ## Exploitation
 
