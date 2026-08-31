@@ -127,6 +127,39 @@ Pour le HTTPS, `certbot` écrit lui-même le bloc 443 et la redirection :
 sudo certbot --nginx -d VOTRE-DOMAINE
 ```
 
+### Compression des réponses de l'API
+
+Le bloc `location /api/` du vhost compresse les réponses JSON. Sans ses quatre
+lignes, aucune ne l'est : le `gzip_types` par défaut de nginx ne couvre que
+`text/html`, et `gzip_proxied` lui interdit par défaut de compresser quoi que ce
+soit qui vienne d'un *upstream*.
+
+**Ce réglage exige une API qui compare les `ETag` faiblement**, c'est-à-dire une
+image qui embarque au moins
+[tout-pris-api#94](https://github.com/AxineTeam/tout-pris-api/pull/94). Le
+déployer avant elle casse la revalidation en silence.
+
+Dès qu'il compresse, nginx n'a plus le droit de promettre que la réponse est
+identique octet pour octet à celle de l'origine : il affaiblit l'empreinte,
+`ETag: "abc"` devient `ETag: W/"abc"`. Le navigateur renvoie cette forme
+affaiblie dans `If-None-Match` au sondage suivant, et une API qui compare les
+empreintes comme des chaînes brutes ne la reconnaît plus : elle répond `200`
+avec le corps entier là où elle répondait `304`. Rien n'échoue, rien
+n'apparaît dans les logs — on aurait activé la compression et désactivé la
+revalidation dans le même geste.
+
+Après déploiement, `Content-Encoding: gzip` doit apparaître sur une réponse JSON
+de plus d'un kilooctet — la liste des lignes d'un voyage, que le front sonde
+toutes les trois secondes, en est une :
+
+```sh
+curl -sS -o /dev/null -D - -H 'Accept-Encoding: gzip' -b cookies.txt \
+  https://VOTRE-DOMAINE/api/households/1/trips/1/items/
+```
+
+Et une seconde requête portant l'`ETag` reçu doit répondre `304`, pas `200` :
+c'est elle qui vérifie la dépendance ci-dessus.
+
 ### Sauvegardes
 
 Trois fichiers, un par responsabilité : le script sauvegarde, le timer
